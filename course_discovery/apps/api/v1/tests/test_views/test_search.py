@@ -18,11 +18,13 @@ from course_discovery.apps.core.tests.factories import USER_PASSWORD, PartnerFac
 from course_discovery.apps.core.tests.mixins import ElasticsearchTestMixin
 from course_discovery.apps.course_metadata.choices import CourseRunStatus, ProgramStatus
 from course_discovery.apps.course_metadata.models import CourseRun
+from course_discovery.apps.course_metadata.utils import get_course_run_estimated_hours
+from course_discovery.apps.core.utils import serialize_datetime
 from course_discovery.apps.course_metadata.search_indexes.serializers import (
     CourseRunSearchDocumentSerializer, CourseRunSearchModelSerializer, LimitedAggregateSearchSerializer
 )
 from course_discovery.apps.course_metadata.tests.factories import (
-    CourseFactory, CourseRunFactory, OrganizationFactory, PersonFactory, PositionFactory, ProgramFactory
+    CourseFactory, CourseRunFactory, OrganizationFactory, PersonFactory, PositionFactory, ProgramFactory, SeatFactory
 )
 from course_discovery.apps.learner_pathway.models import LearnerPathway
 from course_discovery.apps.learner_pathway.tests.factories import LearnerPathwayStepFactory
@@ -495,6 +497,67 @@ class AggregateSearchViewSetTests(mixins.SerializationMixin, mixins.LoginMixin, 
             json.loads(JSONRenderer().render(self.serialize_course_search(course_run.course)).decode('utf-8')),
         ]
         self.assertCountEqual(response_data['results'], expected)
+
+    def test_results_filtered_by_exclude_expired_course_run(self):
+        """ Verify that there the result of combining exclud_expired_course_run and other parameters work fine. """
+        now = datetime.datetime.now(pytz.UTC)
+
+        # Creating course and its course runs for testing both parameters
+        course = CourseFactory(key='edX+DemoX', title='ABCs of Ͳҽʂէìղց', partner=self.partner)
+        course_run1 = CourseRunFactory(course=course, status=CourseRunStatus.Published, enrollment_start=now-datetime.timedelta(weeks=90), enrollment_end=None, end=now-datetime.timedelta(weeks=80))
+        course_run2 = CourseRunFactory(course=course, status=CourseRunStatus.Published, enrollment_start=now-datetime.timedelta(weeks=100), enrollment_end=now-datetime.timedelta(weeks=87), start=now-datetime.timedelta(weeks=85), end=now-datetime.timedelta(weeks=80))
+        course_run3 = CourseRunFactory(course=course, status=CourseRunStatus.Unpublished, enrollment_start=None, enrollment_end=None, end=now+datetime.timedelta(weeks=80))
+        course_run4 = CourseRunFactory(course=course, status=CourseRunStatus.Unpublished, enrollment_start=None, enrollment_end=None, end=now-datetime.timedelta(weeks=60))
+
+        course.canonical_course_run = course_run1
+        course.save()
+
+        # Craeting seats to make course runs marketable
+        seat1 = SeatFactory(course_run=course_run1)
+        seat2 = SeatFactory(course_run=course_run2)
+        seat3 = SeatFactory(course_run=course_run3)
+        seat4 = SeatFactory(course_run=course_run4)
+
+        self.refresh_index()
+
+        query = {'content_type': 'course', 'status': 'published', 'exclude_expired_course_run':'true'}
+
+        # Filter results excluding expired course runs but inclusing published course runs.
+        with self.assertNumQueries(10):
+            response = self.get_response(query, endpoint=self.list_path)
+        assert response.status_code == 200
+
+        response_data = response.json()
+
+        # import pdb; pdb.set_trace()
+
+        def course_run_detail(course_run):
+            course_run_detail = {
+                'key': course_run.key,
+                'enrollment_start': serialize_datetime(course_run.enrollment_start),
+                'enrollment_end': serialize_datetime(course_run.enrollment_end),
+                'go_live_date': course_run.go_live_date,
+                'start': serialize_datetime(course_run.start),
+                'end': serialize_datetime(course_run.end),
+                'modified': serialize_datetime(course_run.modified),
+                'availability': course_run.availability,
+                'status': course_run.status,
+                'pacing_type': course_run.pacing_type,
+                'enrollment_mode': course_run.type_legacy,
+                'min_effort': course_run.min_effort,
+                'max_effort': course_run.max_effort,
+                'weeks_to_complete': course_run.weeks_to_complete,
+                'estimated_hours': get_course_run_estimated_hours(course_run),
+                'first_enrollable_paid_seat_price': course_run.first_enrollable_paid_seat_price or 0.0,
+                'is_enrollable': course_run.is_enrollable,
+            }
+            return course_run_detail
+        
+        expected = [
+            course_run_detail(run)
+            for run in (course_run1, course_run2, course_run3)
+        ]
+        assert response_data['results'][0]['course_runs'] == expected
 
     def test_empty_query(self):
         """ Verify, when the query (q) parameter is empty, the endpoint behaves as if the parameter

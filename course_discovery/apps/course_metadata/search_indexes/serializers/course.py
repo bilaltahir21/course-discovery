@@ -66,6 +66,18 @@ class CourseSearchDocumentSerializer(ModelObjectDocumentSerializerMixin, DateTim
         now = datetime.datetime.now(pytz.UTC)
         exclude_expired = request.GET.get('exclude_expired_course_run')
         detail_fields = request.GET.get('detail_fields')
+
+        ignored_params = []
+
+        def should_include_course_run(course_run, params, exclude_expired):
+            matches_parameter = False
+            for key in params:
+                if key not in ignored_params and hasattr(course_run, key):
+                    for param in params[key]:
+                        if param==getattr(course_run, key):
+                            matches_parameter = True
+            return (not exclude_expired or matches_parameter or course_run.end is None or course_run.end > now)
+
         return [
             self.course_run_detail(request, detail_fields, course_run)
             for course_run in course_runs
@@ -73,7 +85,7 @@ class CourseSearchDocumentSerializer(ModelObjectDocumentSerializerMixin, DateTim
             # runs whose end date is passed. We do this here, rather than as an additional
             # `.exclude` because the course_runs have been prefetched by the read_queryset
             # of the search index.
-            if (not exclude_expired or course_run.end is None or course_run.end > now)
+            if should_include_course_run(course_run, dict(request.GET), exclude_expired)
         ]
 
     def get_seat_types(self, result):
